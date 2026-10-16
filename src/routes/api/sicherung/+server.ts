@@ -2,23 +2,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { json } from '@sveltejs/kit';
-import { loadStations, state } from '#lib/server/overtone';
-import { createAlarm, listAlarms } from '#lib/server/alarms';
-import { createScene, listScenes, readPlayMode, readSound } from '#lib/server/scenes';
-import { anlegen, fensterListe, setzeGlobal, sperreGlobal } from '#lib/server/sperre';
+import { readPlayMode, readSound } from '#lib/server/scenes';
+import { pinGesetzt, pinPasst, sperreGlobal } from '#lib/server/sperre';
+import { wiederherstellen, vorpruefen, sicherungsInhalt } from '#lib/server/wiederherstellung';
 
 const ORDNER = path.join(os.homedir(), '.overtone', 'sicherungen');
 
-type Inhalt = {
-	erstellt: string;
-	sender: unknown[];
-	szenen: ReturnType<typeof listScenes>;
-	weckzeiten: Awaited<ReturnType<typeof listAlarms>>;
-	sperrzeiten: ReturnType<typeof fensterListe>;
-	sperreGlobal: boolean;
-	klang: { bass: number | null; treble: number | null; loudness: number | null } | null;
-	wiedergabeart: string | null;
-};
 
 function stempel(): string {
 	const d = new Date();
@@ -28,17 +17,9 @@ function stempel(): string {
 
 // Alles, was in diesem Dienst entstanden ist, als eine Datei. Das Geraet selbst
 // wird nur gelesen, nie beschrieben.
-async function sammeln(): Promise<Inhalt> {
-	return {
-		erstellt: new Date().toISOString(),
-		sender: (loadStations() as unknown[]) ?? [],
-		szenen: listScenes(),
-		weckzeiten: await listAlarms().catch(() => []),
-		sperrzeiten: fensterListe(),
-		sperreGlobal: sperreGlobal(),
-		klang: await readSound().catch(() => null),
-		wiedergabeart: await readPlayMode().catch(() => null)
-	};
+async function sammeln(): Promise<Record<string, unknown>> {
+    return { ...await sicherungsInhalt(), sperreGlobal: sperreGlobal(),
+        klang: await readSound().catch(() => null), wiedergabeart: await readPlayMode().catch(() => null) };
 }
 
 function neuesteDatei(): string | null {
@@ -54,7 +35,8 @@ function neuesteDatei(): string | null {
 }
 
 export async function GET({ url }) {
-	const inhalt = await sammeln();
+	let inhalt: Awaited<ReturnType<typeof sammeln>>;
+	try { inhalt = await sammeln(); } catch (e) { return json({ ok: false, message: `Sicherung konnte nicht vollständig gelesen werden: ${String(e)}` }, { status: 503 }); }
 	fs.mkdirSync(ORDNER, { recursive: true });
 	const datei = path.join(ORDNER, `overtone-${stempel()}.json`);
 	fs.writeFileSync(datei, JSON.stringify(inhalt, null, 1), 'utf8');
@@ -64,10 +46,10 @@ export async function GET({ url }) {
 		datei,
 		erstellt: inhalt.erstellt,
 		anzahl: {
-			sender: inhalt.sender.length,
-			szenen: inhalt.szenen.length,
-			weckzeiten: inhalt.weckzeiten.length,
-			sperrzeiten: inhalt.sperrzeiten.length
+			sender: (inhalt.sender as unknown[]).length,
+			szenen: (inhalt.szenen as unknown[]).length,
+			weckzeiten: (inhalt.weckzeiten as unknown[]).length,
+			sperrzeiten: (inhalt.sperrzeiten as unknown[]).length
 		},
 		hinweis: `Sicherung geschrieben: ${path.basename(datei)}`
 	};
@@ -75,79 +57,70 @@ export async function GET({ url }) {
 }
 
 export async function POST({ request }) {
-	const body = (await request.json().catch(() => ({}))) as {
-		action?: string;
-		datei?: string;
-		inhalt?: Partial<Inhalt>;
-	};
-	const aktion = String(body.action ?? 'wiederherstellen');
+	let roh: unknown;
+	try {
+		roh = await request.json();
+	} catch {
+		return json({ ok: false, message: 'Anfrage ist kein gültiges JSON.' }, { status: 400 });
+	}
+	// Null, Listen und einfache Werte sind keine Anfragen; verstaendlich
+	// ablehnen statt sie wie eine leere Anfrage zu behandeln.
+	if (typeof roh !== 'object' || roh === null || Array.isArray(roh)) {
+		return json({ ok: false, message: 'Anfrage muss ein Objekt sein.' }, { status: 400 });
+	}
+	const body = roh as Record<string, unknown>;
+	// Optionale Anfragefelder werden vor ihrer Verwendung auf den Typ geprueft.
+	for (const feld of ['action', 'datei', 'pin', 'token'] as const) {
+		if (body[feld] !== undefined && typeof body[feld] !== 'string') {
+			return json({ ok: false, message: `"${feld}" ist kein Text.` }, { status: 400 });
+		}
+	}
+	const aktion = body.action === undefined ? 'wiederherstellen' : (body.action as string);
 
-	if (aktion !== 'wiederherstellen') {
+	if (!['wiederherstellen','vorpruefen'].includes(aktion)) {
 		return json({ ok: false, message: 'unbekannte Aktion' }, { status: 400 });
 	}
 
-	let inhalt = body.inhalt as Inhalt | undefined;
+	// Ein ausdruecklich vorhandenes, ungueltiges inhalt darf nicht rueckwaerts
+	// auf die juengste Sicherung ausweichen.
+	if (body.inhalt !== undefined) {
+		if (typeof body.inhalt !== 'object' || body.inhalt === null || Array.isArray(body.inhalt)) {
+			return json({ ok: false, message: '"inhalt" ist kein Objekt.' }, { status: 400 });
+		}
+	}
+
+	// Die PIN kommt vor saemtlichen Schreibvorgaengen und Geraetebefehlen:
+	// fehlend oder falsch heisst 403 und keinerlei Aenderung.
+	if (pinGesetzt() && !pinPasst(String(body.pin ?? ''))) {
+		return json({ ok: false, message: 'Falscher oder fehlender Code.' }, { status: 403 });
+	}
+
+	let quellDatei = '';
+	let inhalt: unknown = body.inhalt;
 	if (!inhalt) {
+		// Pfadanteile trennt path.basename ab; ein leeres Anfrageobjekt waehlt
+		// so weiterhin die juengste Sicherung.
 		const datei = body.datei ? path.join(ORDNER, path.basename(String(body.datei))) : neuesteDatei();
 		if (!datei || !fs.existsSync(datei)) {
 			return json({ ok: false, message: 'Keine Sicherung gefunden.' }, { status: 404 });
 		}
+		quellDatei = datei;
 		try {
-			inhalt = JSON.parse(fs.readFileSync(datei, 'utf8')) as Inhalt;
+			inhalt = JSON.parse(fs.readFileSync(datei, 'utf8')) as unknown;
 		} catch (fehler) {
 			return json({ ok: false, message: `Sicherung nicht lesbar: ${fehler}` }, { status: 400 });
 		}
 	}
 
-	const angelegt = { szenen: 0, weckzeiten: 0, sperrzeiten: 0 };
-	const fehler: string[] = [];
-
-	for (const sz of inhalt.szenen ?? []) {
-		// Gespeicherte Sicherungen tragen die Feldnamen der Datenbank
-		// (station_id, play_mode), die Eingabe erwartet stationId und playMode.
-		// Deshalb beide Schreibweisen lesen, sonst geht der Sender verloren.
-		const roh = sz as unknown as Record<string, unknown>;
-		const sender = String(roh.stationId ?? roh.station_id ?? '');
-		const art = String(roh.playMode ?? roh.play_mode ?? '');
-		const r = await createScene({
-			name: sz.name,
-			...(sender ? { stationId: sender } : {}),
-			...(typeof sz.volume === 'number' ? { volume: sz.volume } : {}),
-			...(typeof sz.bass === 'number' ? { bass: sz.bass } : {}),
-			...(typeof sz.treble === 'number' ? { treble: sz.treble } : {}),
-			...(typeof sz.loudness === 'number' ? { loudness: sz.loudness } : {}),
-			...(art ? { playMode: art } : {})
-		});
-		if (r.ok) angelegt.szenen += 1;
-		else fehler.push(`Szene ${sz.name}: ${r.message ?? 'abgelehnt'}`);
-	}
-
-	for (const w of inhalt.weckzeiten ?? []) {
-		const r = await createAlarm({
-			time: w.time,
-			...(w.recurrence ? { recurrence: w.recurrence } : {}),
-			...(typeof w.volume === 'number' ? { volume: w.volume } : {}),
-			...(w.stationId ? { stationId: w.stationId } : {}),
-			...(w.duration ? { duration: w.duration } : {}),
-			...(w.label ? { label: w.label } : {})
-		});
-		if (r.ok) angelegt.weckzeiten += 1;
-		else fehler.push(`Weckzeit ${w.time}: ${r.message ?? 'abgelehnt'}`);
-	}
-
-	for (const s of inhalt.sperrzeiten ?? []) {
-		if (s.einmalBis) continue; // Schnellsperren sind vergaenglich
-		anlegen({ name: s.name, tage: s.tage, von: s.von, bis: s.bis, tasten: s.tasten, stumm: s.stumm });
-		angelegt.sperrzeiten += 1;
-	}
-
-	if (typeof inhalt.sperreGlobal === 'boolean') setzeGlobal(inhalt.sperreGlobal);
-	state.lastError = '';
-
-	return json({
-		ok: true,
-		angelegt,
-		fehler,
-		hinweis: `Wiederhergestellt: ${angelegt.szenen} Szenen, ${angelegt.weckzeiten} Weckzeiten, ${angelegt.sperrzeiten} Sperrzeiten.`
-	});
+    for (const feld of ['optionen','entscheidungen'] as const) {
+        const wert = body[feld];
+        if (wert !== undefined && (!wert || typeof wert !== 'object' || Array.isArray(wert))) return json({ ok: false, message: `${feld} muss ein Objekt sein.` }, { status: 400 });
+    }
+    const optionen = (body.optionen ?? {}) as Record<string, unknown>;
+    if (Object.entries(optionen).some(([k,v]) => !['klang','wiedergabeart','zeitplan','aktivieren'].includes(k) || typeof v !== 'boolean')) return json({ ok: false, message: 'Ungültige Auswahl.' }, { status: 400 });
+    const entscheidungen = (body.entscheidungen ?? {}) as Record<string, string>;
+    if (Object.values(entscheidungen).some(v => typeof v !== 'string')) return json({ ok: false, message: 'Ungültige Konfliktentscheidung.' }, { status: 400 });
+    const bericht = aktion === 'vorpruefen' ? await vorpruefen(inhalt) : await wiederherstellen(inhalt, body.token as string | undefined, optionen, entscheidungen);
+    const { status: httpStatus, ...daten } = bericht;
+    return json({ ok: httpStatus === 200, ...daten, ...(quellDatei ? { datei: path.basename(quellDatei) } : {}) }, { status: httpStatus });
 }

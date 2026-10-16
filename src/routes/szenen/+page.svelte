@@ -86,7 +86,6 @@
 									{sz.stationName}{sz.volume !== null ? ` · Lautstärke ${sz.volume}` : ''}
 								</p>
 							</div>
-							<span class="badge badge-ghost badge-sm shrink-0">Szene</span>
 						</div>
 						<div class="flex gap-2">
 							<button

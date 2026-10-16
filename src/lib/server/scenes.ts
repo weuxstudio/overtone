@@ -2,6 +2,7 @@
 // They are stored locally, the device only gets the resulting commands.
 
 import { call } from './sonos';
+import { status as sperrstatus } from './sperre';
 import { config, loadStations, playStream, state } from './overtone';
 import { deleteSceneRow, insertScene, sceneRow, sceneRows, updateSceneRow, type SceneRow } from './store';
 
@@ -90,6 +91,7 @@ export async function createScene(input: SceneInput): Promise<{ ok: boolean; sce
 }
 
 export async function applyScene(id: number): Promise<{ ok: boolean; message?: string }> {
+	if (sperrstatus().gesperrt) return { ok: false, message: 'Während der vorgesehenen Sperre können keine Szenen angewendet werden.' };
 	const row = sceneRow(id);
 	if (!row) return { ok: false, message: 'Szene gibt es nicht' };
 	const sender = loadStations().find((s) => s.id === row.station_id);

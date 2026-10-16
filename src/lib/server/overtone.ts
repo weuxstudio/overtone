@@ -2,12 +2,13 @@
 // Keeps one event subscription per service, holds the current state and pushes
 // updates to the user interface through server sent events.
 
+import type { Geraeteschutz, Pruefstand } from '../schutz';
 import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { call, unescapeXml } from './sonos';
-import { alarmRow, einstellung, loescheEinstellung, setzeEinstellung } from './store';
+import { alarmRow, einstellung, loescheEinstellung, setzeEinstellung, registriereHerkunft, pflegeHerkunft, loeschvermerk } from './store';
 import { aufraeumen as sperrenAufraeumen, status as sperreStatus, type Sperrstatus } from './sperre';
 import { leseStreamDaten } from './icy';
 
@@ -23,6 +24,8 @@ export type OvertoneState = {
 	duration: string;
 	updated: string;
 	events: number;
+	// Erreichbarkeit des Lautsprechers, null heisst noch nicht geprueft.
+	deviceReachable: boolean | null;
 	lastError: string;
 	klang: { bass: number | null; treble: number | null; loudness: number | null };
 	led: string;
@@ -86,6 +89,7 @@ export const state: OvertoneState = {
 	duration: '',
 	updated: '',
 	events: 0,
+	deviceReachable: null,
 	lastError: '',
 	klang: { bass: null, treble: null, loudness: null },
 	led: '',
@@ -99,7 +103,8 @@ export const state: OvertoneState = {
 		stumm: false,
 		schnell: false,
 		freigabeBis: '',
-		global: true
+		global: true,
+		fenster: []
 	}
 };
 
@@ -109,6 +114,7 @@ type Client = { write: (chunk: string) => void };
 const clients = new Set<Client>();
 
 export function addClient(client: Client): void {
+	state.sperre = aktuellerSperrstatus();
 	clients.add(client);
 	client.write(`data: ${JSON.stringify(state)}\n\n`);
 }
@@ -118,6 +124,7 @@ export function removeClient(client: Client): void {
 }
 
 function broadcast(): void {
+	state.sperre = aktuellerSperrstatus();
 	const payload = `data: ${JSON.stringify(state)}\n\n`;
 	for (const c of clients) {
 		try {
@@ -175,8 +182,15 @@ function readEvent(body: string): Record<string, string> {
 	return out;
 }
 
-function applyEvent(values: Record<string, string>): void {
+// Wird vom Ereignisempfaenger angeredet; fuer die Tests auch ohne Netz.
+export function applyEvent(values: Record<string, string>): void {
 	let changed = false;
+	// Eine gueltige Ereignisnachricht beweist den Kontakt zum Geraet, unabhaengig
+	// vom Ereigniszaehler.
+	if (state.deviceReachable !== true) {
+		state.deviceReachable = true;
+		changed = true;
+	}
 	if ('TransportState' in values && values.TransportState !== state.transportState) {
 		state.transportState = values.TransportState;
 		changed = true;
@@ -213,7 +227,9 @@ function applyEvent(values: Record<string, string>): void {
 
 // ------------------------------------------------------------------ listener
 
-function callbackAddress(): string {
+// Die Netzadresse, unter der das Geraet diesen Dienst erreicht: ein ausdruecklich
+// gesetzter callbackHost behaelt Vorrang, sonst die IPv4 im Netz der Box.
+export function callbackAddress(): string {
 	if (config.callbackHost) return config.callbackHost;
 	const subnet = config.host.split('.').slice(0, 3).join('.') + '.';
 	const kandidaten: string[] = [];
@@ -224,6 +240,28 @@ function callbackAddress(): string {
 	}
 	// The device can only reach us on the same network, never over a VPN address.
 	return kandidaten.find((a) => a.startsWith(subnet)) ?? kandidaten[0] ?? '127.0.0.1';
+}
+
+// Eigene Tondateien und Ereignisempfaenger teilen sich diese Adresse. Der
+// aufliegende Wert zählt auch bei automatisch erkannter Adresse, sonst wuerde
+// eine eigene Ansage als fremder Stream gelten.
+// Eigene Tondateien und Ereignisempfaenger teilen sich diese Adresse:
+// der Tonserver baut die Audiodateien mit derselben Adresserkennung,
+// ein ausdruecklicher callbackHost behaelt Vorrang.
+export function tonAdresse(datei: string): string {
+	const port = process.env.PORT ?? '8770';
+	return `http://${callbackAddress()}:${port}/ton/${datei}`;
+}
+
+export function istEigeneAdresse(uri: string): boolean {
+	if (!uri.startsWith('http')) return false;
+	let wirt = '';
+	try {
+		wirt = new URL(uri).hostname || '';
+	} catch {
+		return false;
+	}
+	return wirt === callbackAddress() || wirt === '127.0.0.1' || wirt === 'localhost';
 }
 
 async function subscribe(
@@ -265,7 +303,7 @@ function coverAusDaten(rohMeta: string, bisheriges: string): string {
 async function holeLaufendeAngaben(): Promise<void> {
 	const uri = state.trackURI;
 	if (!uri.startsWith('http')) return;
-	if (uri.includes(`://${config.callbackHost}:`) || uri.includes('://127.0.0.1:')) {
+	if (istEigeneAdresse(uri)) {
 		// Eigene Ansagen und Klaenge haben keine laufenden Angaben.
 		state.laufenderTitel = '';
 		state.metaQuelle = '';
@@ -367,10 +405,23 @@ function ohneGeraet(): boolean {
 	if (config.host) return false;
 	state.lastError =
 		'Kein Lautsprecher eingetragen. Adresse in ~/.overtone/config.json unter host eintragen.';
+	state.deviceReachable = false;
+	beobachtung = null;
 	return true;
 }
 
-async function frischVomGeraet(): Promise<void> {
+// Der regelmaessige Abgleich meldet Geräteausfall und Erholung ausdruecklich:
+// wird das Geraet sichtbar, sofern die Meldung noch nicht draussen ist.
+function meldeErreichbarkeit(erreichbar: boolean): boolean {
+	const vorher = state.deviceReachable;
+	state.deviceReachable = erreichbar;
+	if (!erreichbar) beobachtung = null;
+	return vorher !== erreichbar;
+}
+
+// Der zyklische Geräteabgleich; auch exportiert, damit die Erreichbarkeit
+// im Test nachvollziehbar angestoßen werden kann.
+export async function frischVomGeraet(): Promise<void> {
 	if (ohneGeraet()) {
 		broadcast();
 		return;
@@ -408,7 +459,7 @@ async function frischVomGeraet(): Promise<void> {
 			const wert = Number(vol.values.CurrentVolume);
 			if (!Number.isNaN(wert)) state.volume = wert;
 		}
-		if (mute.ok) state.mute = mute.values.CurrentMute === '1';
+		if (mute.ok && ['0','1'].includes(mute.values.CurrentMute)) state.mute = mute.values.CurrentMute === '1';
 		const nachher = JSON.stringify([
 			state.transportState,
 			state.trackURI,
@@ -421,12 +472,18 @@ async function frischVomGeraet(): Promise<void> {
 			state.volume,
 			state.mute
 		]);
-		if (vorher !== nachher) {
+		beobachtung = { zeit: Date.now(), transport: trans.ok ? trans.values.CurrentTransportState : undefined, volume: vol.ok && /^\d{1,3}$/.test(vol.values.CurrentVolume ?? '') && Number(vol.values.CurrentVolume) <= 100 ? Number(vol.values.CurrentVolume) : undefined, mute: mute.ok && ['0','1'].includes(mute.values.CurrentMute) ? mute.values.CurrentMute === '1' : undefined };
+		const verbunden = meldeErreichbarkeit(trans.ok && vol.ok && mute.ok);
+		if (vorher !== nachher || verbunden || state.sperre.gesperrt) {
 			state.updated = new Date().toISOString();
 			broadcast();
 		}
 	} catch {
 		/* Geraet gerade nicht erreichbar */
+		if (meldeErreichbarkeit(false)) {
+			state.updated = new Date().toISOString();
+			broadcast();
+		}
 	}
 }
 
@@ -470,7 +527,7 @@ async function readDeviceInfo(): Promise<void> {
 		const vol = await call(config.host, 'RenderingControl', 'GetVolume', { InstanceID: 0, Channel: 'Master' });
 		if (vol.ok) state.volume = Number(vol.values.CurrentVolume);
 		const mute = await call(config.host, 'RenderingControl', 'GetMute', { InstanceID: 0, Channel: 'Master' });
-		if (mute.ok) state.mute = mute.values.CurrentMute === '1';
+		if (mute.ok && ['0','1'].includes(mute.values.CurrentMute)) state.mute = mute.values.CurrentMute === '1';
 		const transport = await call(config.host, 'AVTransport', 'GetTransportInfo', { InstanceID: 0 });
 		if (transport.ok) state.transportState = transport.values.CurrentTransportState ?? state.transportState;
 		const media = await call(config.host, 'AVTransport', 'GetMediaInfo', { InstanceID: 0 });
@@ -503,8 +560,16 @@ async function readDeviceInfo(): Promise<void> {
 			treble: hoehen.ok ? Number(hoehen.values.CurrentTreble) : null,
 			loudness: loudness.ok ? Number(loudness.values.CurrentLoudness) : null
 		};
+		if (meldeErreichbarkeit(true)) {
+			state.updated = new Date().toISOString();
+			broadcast();
+		}
 	} catch (err) {
 		state.lastError = String(err);
+		if (meldeErreichbarkeit(false)) {
+			state.updated = new Date().toISOString();
+			broadcast();
+		}
 		console.error('[overtone] Zustandsabfrage fehlgeschlagen', String(err));
 	}
 }
@@ -522,91 +587,261 @@ const runtime: Runtime = ((globalThis as Record<string, unknown>)[globalKey] as 
 let sperreAktiv = false;
 let tastenGesperrt = false;
 let startAbgleich = true;
+// Gleichzeitige Aufrufer warten auf dieselbe tatsaechliche Ausfuehrung; ein
+// waehrend des Laufs angestossener Nachlauf wird in derselben Ausfuehrung
+// erledigt, statt sofort Erfolg zu melden und Geraetebefehle doppelt
+// abzusetzen.
+let ausfuehrung: Promise<SperreErgebnis> | null = null;
+let nachlaufAngefordert = false;
+
+// Ausstehende Freigabeschritte: jeder Schritt bleibt markiert, bis das Geraet
+// ihn bestaetigt hat. Fehlgeschlagene Schritte wiederholt der naechste Durchlauf.
+type Ausstehend = { tasten: boolean; stumm: boolean; lautstaerke: boolean };
+let ausstehend: Ausstehend = { tasten: false, stumm: false, lautstaerke: false };
+let stummDurchgesetzt = false;
+
+export type SperreErgebnis = { ok: boolean; fehler: string[] };
+
+// Ein fehlerhafter Geraetebefehl darf unabhaengige Schutzschritte nicht auslassen.
+async function geraeteschritt(
+	fehler: string[],
+	meldung: string,
+	aktion: () => Promise<boolean>
+): Promise<boolean> {
+	try {
+		if (await aktion()) return true;
+		fehler.push(meldung);
+	} catch (err) {
+		fehler.push(`${meldung} ${String(err)}`);
+	}
+	return false;
+}
 
 async function setzeTastensperre(an: boolean): Promise<boolean> {
 	const r = await call(config.host, 'DeviceProperties', 'SetButtonLockState', {
 		DesiredButtonLockState: an ? 'On' : 'Off'
 	});
-	tastenGesperrt = an && r.ok;
+	// Erst nach erfolgreicher Geraetebestaetigung aendern, sonst wuerde ein
+	// veralteter Wert einen bereits erledigten Schritt erneut ausloesen.
+	if (r.ok) tastenGesperrt = an;
 	return r.ok;
+}
+
+async function freigabeSchritte(host: string): Promise<SperreErgebnis> {
+	const fehler: string[] = [];
+	// Tastenfreigabe: ausstehend, bis das Geraet die Aufhebung nimmt.
+	if (ausstehend.tasten && (startAbgleich || tastenGesperrt)) {
+		const ok = await geraeteschritt(
+			fehler,
+			'Tastensperre konnte am Gerät nicht aufgehoben werden.',
+			() => setzeTastensperre(false)
+		);
+		if (ok) {
+			startAbgleich = false;
+			tastenGesperrt = false;
+			ausstehend.tasten = false;
+		}
+	} else if (ausstehend.tasten) {
+		ausstehend.tasten = false;
+	}
+	// Stummschaltung: ausstehend, bis das Geraet das Aufheben bestätigt.
+	if (ausstehend.stumm) {
+		const ok = await geraeteschritt(
+			fehler,
+			'Stummschaltung konnte am Gerät nicht aufgehoben werden.',
+			async () => (await call(host, 'RenderingControl', 'SetMute', {
+				InstanceID: 0, Channel: 'Master', DesiredMute: 0
+			})).ok
+		);
+		// Bestaetigung auch lokal uebernehmen, ein veralteter Zustand wuerde
+		// den erledigten Schritt sonst erneut ausloesen.
+		if (ok) {
+			ausstehend.stumm = false;
+			state.mute = false;
+			stummDurchgesetzt = false;
+		}
+	}
+	// Lautstaerkewiederherstellung: ausstehend, bis das Geraet den alten Stand nahm.
+	if (ausstehend.lautstaerke) {
+		const vorher = Number(einstellung('sperre_lautstaerke') ?? '');
+		if (Number.isFinite(vorher) && vorher > 0) {
+			const ok = await geraeteschritt(
+				fehler,
+				'Lautstärke konnte am Gerät nicht zurückgesetzt werden.',
+				async () => (await call(host, 'RenderingControl', 'SetVolume', {
+					InstanceID: 0, Channel: 'Master', DesiredVolume: vorher
+				})).ok
+			);
+			if (ok) {
+				loescheEinstellung('sperre_lautstaerke');
+				ausstehend.lautstaerke = false;
+				state.volume = vorher;
+			}
+		} else {
+			ausstehend.lautstaerke = false;
+		}
+	}
+	return { ok: fehler.length === 0, fehler };
 }
 
 // Setzt eine laufende Sperre am Geraet durch: Wiedergabe stoppen, Lautstaerke auf
 // null, Tasten sperren. Wird zyklisch gerufen, damit auch Spotify, die Sonos App
-// oder eine Weckzeit die Sperre nicht aushebeln.
-export async function sperreDurchsetzen(): Promise<void> {
+// oder eine Weckzeit die Sperre nicht aushebeln. Gibt ein auswertbares Ergebnis
+// zurueck, etwa fuer den Importbericht einer Wiederherstellung.
+export function sperreDurchsetzen(): Promise<SperreErgebnis> {
+	// Gleichzeitige Aufrufer warten auf den tatsaechlichen Abschluss, statt
+	// sofort Erfolg zu melden: sie markieren einen Nachlauf und teilen sich
+	// das Ergebnis derselben Ausfuehrung.
+	if (ausfuehrung) {
+		nachlaufAngefordert = true;
+		return ausfuehrung;
+	}
+	ausfuehrung = gemeinsameAusfuehrung();
+	return ausfuehrung;
+}
+
+// Ein Durchlauf samt aller waehrend desselben angestossenen Nachlaeufe: Fehler
+// laufen ohne Duplikate zusammen, alle wartenden Aufrufer sehen den vollen
+// Abschluss derselben Ausfuehrung.
+async function gemeinsameAusfuehrung(): Promise<SperreErgebnis> {
+	const zusammen: SperreErgebnis = { ok: true, fehler: [] };
+	try {
+		do {
+			try {
+				zusammenfuehren(await einmalDurchsetzen(), zusammen);
+			} catch (ausnahme) {
+				zusammenfuehren({ ok: false, fehler: [String(ausnahme)] }, zusammen);
+			}
+			// Der Blick davor und die Freigabe am Ende sind synchron; dazwischen
+			// kann kein Aufrufer mehr unterlaufen.
+		} while (nachlaufSchritt());
+	} finally {
+		// Nach Abschluss oder Ausnahme kommt die Ausfuehrung wieder frei.
+		ausfuehrung = null;
+	}
+	return zusammen;
+}
+
+function zusammenfuehren(ergebnis: SperreErgebnis, zusammen: SperreErgebnis): void {
+	if (!ergebnis.ok) zusammen.ok = false;
+	for (const meldung of ergebnis.fehler) {
+		if (!zusammen.fehler.includes(meldung)) zusammen.fehler.push(meldung);
+	}
+}
+
+// Waehrend des Laufs angestossene Nachlaeufe konsumieren; der Rueckgabewert
+// entscheidet ueber den naechsten Durchlauf derselben Ausfuehrung.
+function nachlaufSchritt(): boolean {
+	const erneut = nachlaufAngefordert;
+	nachlaufAngefordert = false;
+	return erneut;
+}
+
+async function einmalDurchsetzen(): Promise<SperreErgebnis> {
 	const st = sperreStatus(new Date());
 	const host = config.host;
+	const fehler: string[] = [];
 	// Der Sperrzustand geht immer an die Oberflaeche, auch wenn das Geraet
 	// gerade nicht antwortet.
 	if (state.sperre.gesperrt !== st.gesperrt || state.sperre.freigabeBis !== st.freigabeBis) {
-		state.sperre = st;
+		state.sperre = { ...st, geraet: state.sperre.geraet };
 		broadcast();
 	} else {
-		state.sperre = st;
+		state.sperre = { ...st, geraet: state.sperre.geraet };
 	}
-	const ruhe = !st.gesperrt && !sperreAktiv && !startAbgleich;
+	const wartet = ausstehend.tasten || ausstehend.stumm || ausstehend.lautstaerke;
+	const ruhe = !st.gesperrt && !sperreAktiv && !startAbgleich && !wartet;
 	if (ruhe) {
 		sperrenAufraeumen();
-		return;
+		return { ok: true, fehler: [] };
 	}
 	try {
 		if (st.gesperrt) {
 			if (!sperreAktiv) {
-				// Beginn der Sperre: Lautstaerke merken, damit sie danach zurueckkommt.
-				const vorher =
-					typeof state.volume === 'number' ? state.volume : Number(einstellung('sperre_lautstaerke') ?? '');
-				if (Number.isFinite(vorher) && vorher > 0) setzeEinstellung('sperre_lautstaerke', String(vorher));
-				await call(host, 'AVTransport', 'Stop', { InstanceID: 0 });
-			} else if (['PLAYING', 'PAUSED_PLAYBACK', 'TRANSITIONING'].includes(state.transportState)) {
-				await call(host, 'AVTransport', 'Stop', { InstanceID: 0 });
+				// Beginn der Sperre: Freigabeschritte ruecksetzen, Lautstaerke merken,
+				// damit sie danach zurueckkommt.
+				ausstehend = { tasten: false, stumm: false, lautstaerke: false };
+				stummDurchgesetzt = false;
+            }
+            if (st.stumm && !stummDurchgesetzt) {
+                const vorher = typeof state.volume === 'number' ? state.volume : Number(einstellung('sperre_lautstaerke') ?? '');
+                if (Number.isFinite(vorher) && vorher > 0) setzeEinstellung('sperre_lautstaerke', String(vorher));
+                // Even a lost command reply may have changed the device. Remember the requested protection for release.
+                stummDurchgesetzt = true;
+            }
+			if (!sperreAktiv || ['PLAYING', 'PAUSED_PLAYBACK', 'TRANSITIONING'].includes(state.transportState)) {
+				await geraeteschritt(
+					fehler,
+					'Wiedergabe konnte am Gerät nicht gestoppt werden.',
+					async () => (await call(host, 'AVTransport', 'Stop', { InstanceID: 0 })).ok
+				);
 			}
-			if (st.tasten && !tastenGesperrt) await setzeTastensperre(true);
+			if ((!st.tasten && (tastenGesperrt || startAbgleich)) || (!st.stumm && stummDurchgesetzt)) {
+				ausstehend.tasten = !st.tasten && (tastenGesperrt || startAbgleich);
+				ausstehend.stumm = !st.stumm && stummDurchgesetzt;
+				ausstehend.lautstaerke = !st.stumm && !!einstellung('sperre_lautstaerke');
+				fehler.push(...(await freigabeSchritte(host)).fehler);
+			}
+			if (st.tasten && !tastenGesperrt) {
+				await geraeteschritt(
+					fehler,
+					'Tastensperre konnte am Gerät nicht gesetzt werden.',
+					() => setzeTastensperre(true)
+				);
+			}
 			if (st.stumm) {
 				if (state.volume === null || state.volume > 0) {
-					await call(host, 'RenderingControl', 'SetVolume', {
-						InstanceID: 0,
-						Channel: 'Master',
-						DesiredVolume: 0
-					});
+					const ok = await geraeteschritt(
+						fehler,
+						'Lautstärke konnte am Gerät nicht auf null gesetzt werden.',
+						async () => (await call(host, 'RenderingControl', 'SetVolume', {
+							InstanceID: 0, Channel: 'Master', DesiredVolume: 0
+						})).ok
+					);
+					// Bestaetigten Stand auch lokal uebernehmen, ein veralteter Wert
+					// wuerde den erledigten Schritt sonst erneut ausloesen.
+					if (ok) {
+						stummDurchgesetzt = true;
+						state.volume = 0;
+					}
 				}
 				if (!state.mute) {
-					await call(host, 'RenderingControl', 'SetMute', { InstanceID: 0, Channel: 'Master', DesiredMute: 1 });
+					const ok = await geraeteschritt(
+						fehler,
+						'Stummschaltung konnte am Gerät nicht gesetzt werden.',
+						async () => (await call(host, 'RenderingControl', 'SetMute', {
+							InstanceID: 0, Channel: 'Master', DesiredMute: 1
+						})).ok
+					);
+					if (ok) {
+						stummDurchgesetzt = true;
+						state.mute = true;
+					}
 				}
 			}
 			sperreAktiv = true;
 		} else {
 			// Ende der Sperre oder Dienststart ohne Sperre: Geraet wieder freigeben.
-			// Gelingt die Freigabe nicht, wird sie beim naechsten Durchlauf wiederholt.
-			if (startAbgleich || tastenGesperrt) {
-				const ok = await setzeTastensperre(false);
-				if (ok) {
-					startAbgleich = false;
-					tastenGesperrt = false;
-				}
-			}
-			const vorher = Number(einstellung('sperre_lautstaerke') ?? '');
-			if (Number.isFinite(vorher) && vorher > 0) {
-				await call(host, 'RenderingControl', 'SetMute', { InstanceID: 0, Channel: 'Master', DesiredMute: 0 });
-				const r = await call(host, 'RenderingControl', 'SetVolume', {
-					InstanceID: 0,
-					Channel: 'Master',
-					DesiredVolume: vorher
-				});
-				if (r.ok) loescheEinstellung('sperre_lautstaerke');
-			}
+			// Bleibt ein Schritt aus, bleibt er als ausstehend markiert und wird
+			// beim naechsten Durchlauf wiederholt.
+			ausstehend.tasten = ausstehend.tasten || tastenGesperrt || startAbgleich;
+			ausstehend.stumm = ausstehend.stumm || stummDurchgesetzt || !!state.mute;
+			ausstehend.lautstaerke = ausstehend.lautstaerke || !!einstellung('sperre_lautstaerke');
+			const freigabe = await freigabeSchritte(host);
+			fehler.push(...freigabe.fehler);
 			sperreAktiv = false;
 		}
 		sperrenAufraeumen();
-		state.sperre = st;
-		await readDeviceInfo();
+		state.sperre = { ...st, geraet: state.sperre.geraet };
+		letzteSchutzfehler = fehler;
+		if (st.gesperrt || fehler.length) await frischVomGeraet();
 		broadcast();
 	} catch (err) {
-		state.lastError = String(err);
-		broadcast();
-	} finally {
-		startAbgleich = false;
+		fehler.push(String(err));
 	}
+	letzteSchutzfehler = fehler;
+	broadcast();
+	return { ok: fehler.length === 0, fehler };
 }
 
 export async function ensureStarted(): Promise<void> {
@@ -716,6 +951,31 @@ export async function command(
 	if (laufendeSperre.gesperrt) {
 		return { ok: false, message: `Kindersicherung: gesperrt bis ${laufendeSperre.bis || 'Fensterende'}` };
 	}
+	return ausfuehren(action, value);
+}
+
+// Interner Schreiber ausschliesslich fuer Bass, Hoehen, Loudness und
+// Wiedergabeart: die Wiederherstellung nutzt ihn nach der PIN-Pruefung, auch
+// waehrend einer laufenden Kindersicherung. Die gewoehnliche Bedienung bleibt
+// hinter ihrer Sperrpruefung; ein allgemeiner Bypass-Parameter wird nicht
+// eingefuehrt.
+const KLANG_AKTIONEN = new Set(['bass', 'treble', 'loudness', 'playmode']);
+
+export async function klangSetzen(
+	action: string,
+	value?: string | number | boolean
+): Promise<SoapResultBrief> {
+	if (!KLANG_AKTIONEN.has(action)) {
+		return { ok: false, message: 'unbekannter Befehl: ' + action };
+	}
+	await ensureStarted();
+	return ausfuehren(action, value);
+}
+
+async function ausfuehren(
+	action: string,
+	value?: string | number | boolean
+): Promise<SoapResultBrief> {
 	const host = config.host;
 	try {
 		switch (action) {
@@ -839,7 +1099,7 @@ function minutesToClock(minutes: number): string {
 	return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00`;
 }
 
-export type Station = { id: string; name: string; url: string };
+export type Station = { id: string; name: string; url: string; herkunft?: string[] };
 
 const STATIONS_FILE = path.join(CONFIG_DIR, 'stations.json');
 
@@ -851,19 +1111,30 @@ const DEFAULT_STATIONS: Station[] = [
 	{ id: 'dlf', name: 'Deutschlandfunk', url: 'https://st01.sslstream.dlf.de/dlf/01/128/mp3/stream.mp3' }
 ];
 
-export function loadStations(): Station[] {
+export function loadStations(streng = false): Station[] {
 	try {
 		const raw = JSON.parse(fs.readFileSync(STATIONS_FILE, 'utf8'));
-		if (Array.isArray(raw) && raw.length) return raw as Station[];
-	} catch {
-		try {
-			fs.mkdirSync(CONFIG_DIR, { recursive: true });
-			fs.writeFileSync(STATIONS_FILE, JSON.stringify(DEFAULT_STATIONS, null, 2));
-		} catch {
-			/* ignore */
-		}
+		if (Array.isArray(raw) && raw.every(s => s && ['id','name','url'].every(k => typeof s[k] === 'string' && s[k].trim()))) return raw as Station[];
+		if (streng) throw new Error('Die Senderdatei enthält keine gültige Senderliste.');
+	} catch (e) {
+		if (streng && !(e && typeof e === 'object' && 'code' in e && e.code === 'ENOENT')) throw e;
 	}
 	return DEFAULT_STATIONS;
+}
+
+// Senderliste dauerhaft schreiben, etwa bei einer Wiederherstellung.
+export function saveStations(list: Station[]): void {
+    const vorher = loadStations(true);
+    fs.mkdirSync(CONFIG_DIR, { recursive: true });
+    const tmp = `${STATIONS_FILE}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(list, null, 2));
+    fs.renameSync(tmp, STATIONS_FILE);
+    for (const alt of vorher) if (!list.some(s => s.id === alt.id)) loeschvermerk('sender', alt.id);
+    for (const sender of list) {
+        const alt = vorher.find(s => s.id === sender.id);
+        if (alt && (alt.name !== sender.name || alt.url !== sender.url)) pflegeHerkunft('sender', sender.id, sender);
+        else registriereHerkunft('sender', sender.id, sender);
+    }
 }
 
 // Some stations answer with a redirect. Follow it here so the device gets a
@@ -894,8 +1165,10 @@ export async function playStream(url: string, title: string): Promise<SoapResult
 	}
 	const { didlForHttpAudio } = await import('./sonos');
 	// Eigene Tondateien liegen hier im Haus, da gibt es nichts aufzuloesen.
-	const eigen =
-		url.includes(`://${config.callbackHost}:`) || url.includes('://127.0.0.1:') || url.includes('://localhost:');
+	// Die Erkennung nutzt die gemeinsame Adresserkennung, nicht den rohen
+	// Konfigurationswert, sonst gilt eine eigene Datei bei automatisch
+	// erkannter Adresse als fremder Stream.
+	const eigen = istEigeneAdresse(url);
 	const target = eigen ? url : await resolveStream(url);
 	const set = await call(config.host, 'AVTransport', 'SetAVTransportURI', {
 		InstanceID: 0,
@@ -912,4 +1185,23 @@ export async function playStream(url: string, title: string): Promise<SoapResult
 	// Gleich einmal nachsehen, damit die Angaben nicht zwanzig Sekunden brauchen.
 	setTimeout(() => void holeLaufendeAngaben(), 2500);
 	return brief(play);
+}
+
+
+let beobachtung: { zeit: number; transport?: string; volume?: number; mute?: boolean } | null = null;
+let letzteSchutzfehler: string[] = [];
+export function aktuellerSperrstatus(): Sperrstatus {
+    const st = sperreStatus();
+    const frisch = beobachtung && Date.now() - beobachtung.zeit < 15000 && state.deviceReachable !== false;
+    const pruefe = (erforderlich: boolean, wert: unknown, passt: boolean): Pruefstand => !erforderlich ? 'nicht_noetig' : !frisch || wert === undefined ? 'ungeprueft' : passt ? 'bestaetigt' : 'abweichend';
+    const stopp = pruefe(st.gesperrt,beobachtung?.transport,['STOPPED','NO_MEDIA_PRESENT'].includes(beobachtung?.transport ?? ''));
+    const lautstaerke = pruefe(st.gesperrt && st.stumm,beobachtung?.volume,beobachtung?.volume === 0);
+    const stumm = pruefe(st.gesperrt && st.stumm,beobachtung?.mute,beobachtung?.mute === true);
+    const werte = [stopp,lautstaerke,stumm];
+    const geraet: Geraeteschutz = { stopp, lautstaerke, stumm,
+        tasten: st.tasten ? tastenGesperrt ? 'angenommen' : 'ausstehend' : 'nicht_noetig',
+        geprueft: beobachtung ? new Date(beobachtung.zeit).toISOString() : '',
+        fehler: letzteSchutzfehler,
+        zustand: !st.gesperrt ? 'nicht_noetig' : werte.includes('abweichend') ? 'abweichend' : werte.includes('ungeprueft') ? 'ungeprueft' : 'bestaetigt' };
+    return { ...st, geraet };
 }

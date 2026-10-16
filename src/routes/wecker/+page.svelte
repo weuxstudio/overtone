@@ -59,6 +59,11 @@
 		formOffen = true;
 	}
 
+	function begrenzteLautstaerke(wert: number | null): number {
+		if (wert === null || !Number.isFinite(wert)) return 0;
+		return Math.max(0, Math.min(60, Math.round(wert)));
+	}
+
 	async function speichern() {
 		laeuftGerade = true;
 		const antwort = await overtone.alarmAktion({
@@ -67,7 +72,7 @@
 			time: `${stunde}:${minute}`,
 			recurrence: wiederholung,
 			stationId,
-			volume: weckLautstaerke
+			volume: begrenzteLautstaerke(weckLautstaerke)
 		});
 		laeuftGerade = false;
 		if (antwort) {
@@ -201,6 +206,7 @@
 					min="0"
 					max="60"
 					bind:value={weckLautstaerke}
+					onchange={() => (weckLautstaerke = begrenzteLautstaerke(weckLautstaerke))}
 				/>
 			</fieldset>
 			<p class="rounded-box bg-base-300 px-3 py-2 text-sm" aria-live="polite">{vorschau}</p>

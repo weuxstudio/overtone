@@ -11,6 +11,8 @@ export type TransportZustand = {
 	relTime: string;
 	duration: string;
 	events: number;
+	// Erreichbarkeit des Lautsprechers vom Dienst aus; null heisst noch ungeprueft.
+	deviceReachable: boolean | null;
 	device: string;
 	host: string;
 	lastError: string;
@@ -36,16 +38,9 @@ export type Sperrfenster = {
 	einmalBis: string;
 };
 
-export type Sperrstatus = {
-	gesperrt: boolean;
-	bis: string;
-	name: string;
-	tasten: boolean;
-	stumm: boolean;
-	schnell: boolean;
-	freigabeBis: string;
-	global: boolean;
-};
+import { schutzText } from '../schutz';
+import type { Sperrstatus } from '../schutz';
+export type { Sperrstatus } from '../schutz';
 
 export type Sender = { id: string; name: string; url: string };
 export type Szene = {
@@ -118,6 +113,7 @@ class Overtone {
 		relTime: '',
 		duration: '',
 		events: 0,
+		deviceReachable: null,
 		device: '',
 		host: '',
 		lastError: '',
@@ -136,7 +132,8 @@ class Overtone {
 			stumm: false,
 			schnell: false,
 			freigabeBis: '',
-			global: true
+			global: true,
+			fenster: []
 		}
 	});
 
@@ -166,7 +163,7 @@ class Overtone {
 	}
 
 	get verbunden() {
-		return this.bereit && !this.zustand.lastError;
+		return this.bereit && this.zustand.deviceReachable === true;
 	}
 
 	get gesperrt() {
@@ -176,9 +173,11 @@ class Overtone {
 	get sperrtext() {
 		const sp = this.zustand.sperre;
 		if (!sp?.gesperrt) return '';
-		const bis = sp.schnell ? new Date(sp.bis).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }) : sp.bis;
-		return `Gesperrt bis ${bis}`;
-	}
+        const bis = new Date(sp.bis).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+        return `Sperre vorgesehen. Nächster Wechsel ${bis}`;
+    }
+
+    get schutztext() { return schutzText(this.zustand.sperre, this.bereit ? this.zustand.deviceReachable : false); }
 
 	get freigabeText() {
 		const bis = this.zustand.sperre?.freigabeBis;
@@ -187,8 +186,13 @@ class Overtone {
 	}
 
 	get verbindungsText() {
-		if (this.zustand.lastError) return 'nicht erreichbar';
-		return this.bereit ? 'verbunden' : 'verbinde ...';
+		// Erreichbarkeitsschicht: erst der Dienstkontakt der Oberflaeche (die
+		// Ereignisverbindung), dann der Status, den der Dienst am Geraet sieht
+		// (deviceReachable). Allgemeine Fehlermeldungen sind hier kein Massstab.
+		if (!this.bereit) return 'nicht erreichbar';
+		if (this.zustand.deviceReachable === false) return 'nicht erreichbar';
+		if (this.zustand.deviceReachable === null) return 'verbinde ...';
+		return 'verbunden';
 	}
 
 	get zustandstext() {
@@ -209,8 +213,12 @@ class Overtone {
 		quelle.onmessage = (e) => {
 			const neu = JSON.parse(e.data);
 			this.zustand = { ...this.zustand, ...neu };
+			// Jede gueltige Zustandsnachricht bestaetigt den Dienstkontakt,
+			// unabhaengig vom Ereigniszaehler. Kommt die Verbindung wieder an,
+			// wird eine spaetere Unterbrechung erneut gemeldet.
+			if (!this.bereit) this.#kontaktGemeldet = false;
+			this.bereit = true;
 			if (!this.zieht && typeof neu.volume === 'number') this.lautstaerke = neu.volume;
-			if (neu.events > 0) this.bereit = true;
 			// Wiedergabe laeuft angekommen: Wartezustand am Knopf aufloesen.
 			if (this.laeuft && this.startend) {
 				this.startend = null;
@@ -218,6 +226,9 @@ class Overtone {
 			}
 		};
 		quelle.onerror = () => {
+			// Der Verbindungsabbruch setzt den Dienstkontakt zurueck. Melden nur
+			// beim Wechsel von verbunden zu weg, danach wieder re-armiert.
+			if (this.bereit) this.bereit = false;
 			if (this.#kontaktGemeldet) return;
 			this.#kontaktGemeldet = true;
 			this.melde('Die Verbindung zum Dienst ist unterbrochen.');

@@ -5,6 +5,13 @@ node_modules
 /.impeccable
 /_alt
 
+# Werkzeugdateien der Coding-Agenten, gehoeren lokal, nicht ins oeffentliche Repo
+/.agents
+/.codex
+/.cursor
+/.gemini
+/skills-lock.json
+
 # Output
 .output
 .vercel

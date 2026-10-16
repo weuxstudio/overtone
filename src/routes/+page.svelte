@@ -49,8 +49,7 @@
 			<div class="card-body gap-2 p-4">
 				<h2 class="text-lg font-semibold">{overtone.sperrtext}</h2>
 				<p class="text-sm">
-					Kindersicherung aktiv. Wiedergabe gestoppt, Lautstärke auf null. Startet jemand über Spotify oder die
-					Sonos App, wird es wieder gestoppt.
+					{overtone.schutztext}
 				</p>
 				<button class="btn btn-primary btn-block h-12" onclick={freigeben}>
 					<Icon name="check" groesse={18} />
@@ -67,7 +66,7 @@
 				alt=""
 				class="absolute inset-0 h-full w-full scale-110 object-cover opacity-80 blur-xl saturate-150"
 			/>
-			<div class="absolute inset-0 bg-gradient-to-t from-neutral/95 via-neutral/70 to-neutral/40"></div>
+			<div class="absolute inset-0 bg-gradient-to-t from-neutral/95 via-neutral/85 to-neutral/60"></div>
 		{:else}
 			<div class="absolute inset-0 bg-base-200"></div>
 		{/if}
@@ -87,20 +86,20 @@
 				{#if overtone.zustand.cover}
 					<img
 						src={overtone.zustand.cover}
-						alt="Cover"
+						alt=""
 						class="h-16 w-16 shrink-0 rounded-xl object-cover shadow-lg"
 					/>
 				{/if}
 				<div class="min-w-0 flex-1">
 					<h2 class="text-2xl leading-tight font-bold break-words">{titel}</h2>
 					{#if zusatz}
-						<p class="mt-1 truncate text-base opacity-70">{zusatz}</p>
+						<p class="mt-1 truncate text-base gedaempft">{zusatz}</p>
 					{/if}
 					{#if overtone.zustand.mute}
-						<p class="mt-1 text-sm opacity-70">stumm</p>
+						<p class="mt-1 text-sm gedaempft">stumm</p>
 					{/if}
 					{#if !overtone.laeuft && overtone.zustand.lastError}
-						<p class="mt-2 text-xs opacity-70">{overtone.zustand.lastError}</p>
+						<p class="mt-2 text-xs text-error">{overtone.zustand.lastError}</p>
 					{/if}
 				</div>
 				<button
@@ -123,12 +122,12 @@
 						<div class="h-1 w-full rounded-full bg-white/25">
 							<div class="h-1 rounded-full bg-white" style="width: {fortschritt}%"></div>
 						</div>
-						<div class="mt-1 flex justify-between text-xs opacity-60">
+						<div class="mt-1 flex justify-between text-xs gedaempft">
 							<span>{overtone.zustand.relTime}</span>
 							<span>{overtone.zustand.duration}</span>
 						</div>
 					{:else}
-						<span class="text-xs opacity-70">
+						<span class="text-xs gedaempft">
 							{angaben ? 'Live vom Sender' : 'Live, kein Fortschritt'}
 						</span>
 					{/if}
@@ -196,8 +195,12 @@
 					value={overtone.lautstaerke}
 					onpointerdown={() => (overtone.zieht = true)}
 					onpointerup={() => (overtone.zieht = false)}
+					onpointercancel={() => (overtone.zieht = false)}
 					oninput={(e) => (overtone.lautstaerke = Number((e.currentTarget as HTMLInputElement).value))}
-					onchange={(e) => overtone.setzeLautstaerke(Number((e.currentTarget as HTMLInputElement).value))}
+					onchange={(e) => {
+						overtone.zieht = false;
+						overtone.setzeLautstaerke(Number((e.currentTarget as HTMLInputElement).value));
+					}}
 				/>
 			</div>
 			<button

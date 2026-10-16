@@ -26,16 +26,8 @@ export type Sperrfenster = {
 	einmalBis: string;
 };
 
-export type Sperrstatus = {
-	gesperrt: boolean;
-	bis: string;
-	name: string;
-	tasten: boolean;
-	stumm: boolean;
-	schnell: boolean;
-	freigabeBis: string;
-	global: boolean;
-};
+import type { Sperrstatus } from '../schutz';
+export type { Sperrstatus } from '../schutz';
 
 export const TAGESTEXT = ['Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag', 'Sonntag'];
 export const TAGKUERZEL = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
@@ -48,7 +40,8 @@ const OHNE_SPERRE: Sperrstatus = {
 	stumm: false,
 	schnell: false,
 	freigabeBis: '',
-	global: true
+	global: true,
+	fenster: []
 };
 
 function minuten(text: string): number {
@@ -90,7 +83,6 @@ export function sperreGlobal(): boolean {
 
 export function setzeGlobal(an: boolean): void {
 	setzeEinstellung('sperre_an', an ? '1' : '0');
-	if (an) freigabeBeenden();
 }
 
 // Trifft dieses Fenster jetzt zu? Ueber Mitternacht gehoert der Teil nach
@@ -114,26 +106,33 @@ export function trifft(row: SperrRow, jetzt: Date): boolean {
 }
 
 export function status(jetzt = new Date()): Sperrstatus {
-	if (!sperreGlobal()) return { ...OHNE_SPERRE, global: false };
-	const freigabe = einstellung('sperre_freigabe_bis');
-	const freigabeEnde = freigabe ? Date.parse(freigabe) : NaN;
-	const freigabeLaeuft = !Number.isNaN(freigabeEnde) && jetzt.getTime() < freigabeEnde;
-	for (const row of sperrRows()) {
-		if (!trifft(row, jetzt)) continue;
-		if (freigabeLaeuft) return { ...OHNE_SPERRE, freigabeBis: freigabe ?? '' };
-		const bis = row.einmal_bis ? row.einmal_bis : uhr(minuten(row.bis));
-		return {
-			gesperrt: true,
-			bis,
-			name: row.name || 'Sperrzeit',
-			tasten: !!row.tasten,
-			stumm: !!row.stumm,
-			schnell: !!row.einmal_bis,
-			freigabeBis: '',
-			global: true
-		};
-	}
-	return freigabeLaeuft ? { ...OHNE_SPERRE, freigabeBis: freigabe ?? '' } : { ...OHNE_SPERRE };
+    const global = sperreGlobal();
+    const freigabe = einstellung('sperre_freigabe_bis');
+    const freigabeEnde = freigabe ? Date.parse(freigabe) : NaN;
+    if (Number.isFinite(freigabeEnde) && jetzt.getTime() < freigabeEnde) {
+        return { ...OHNE_SPERRE, global, freigabeBis: freigabe ?? '' };
+    }
+    const rows = sperrRows().filter(row => (row.einmal_bis || global) && trifft(row, jetzt));
+    if (!rows.length) return { ...OHNE_SPERRE, global };
+    const fenster = rows.map(row => {
+        const ende = new Date(jetzt);
+        ende.setHours(Math.floor(minuten(row.bis) / 60), minuten(row.bis) % 60, 0, 0);
+        if (ende <= jetzt) ende.setDate(ende.getDate() + 1);
+        return { id: row.id, name: row.name || 'Sperrzeit', bis: row.einmal_bis || ende.toISOString() };
+    }).sort((a,b) => a.bis.localeCompare(b.bis));
+    return {
+        gesperrt: true, global, freigabeBis: '', fenster,
+        name: fenster.map(f => f.name).join(', '), bis: fenster[0].bis,
+        tasten: rows.some(r => !!r.tasten), stumm: rows.some(r => !!r.stumm),
+        schnell: rows.some(r => !!r.einmal_bis)
+    };
+}
+
+export function zeitPruefen(von: string, bis: string, tage: number[]): void {
+    const uhrzeit = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+    if (!uhrzeit.test(von) || !uhrzeit.test(bis)) throw new Error('Eine gültige Anfangszeit und Endzeit sind erforderlich.');
+    if (von === bis) throw new Error('Anfangszeit und Endzeit müssen sich unterscheiden.');
+    if (!tage.length || !tage.every(t => Number.isInteger(t) && t >= 1 && t <= 7)) throw new Error('Mindestens einen gültigen Wochentag auswählen.');
 }
 
 export function anlegen(daten: {
@@ -145,7 +144,7 @@ export function anlegen(daten: {
 	tasten?: boolean;
 	stumm?: boolean;
 }): number {
-	freigabeBeenden();
+	zeitPruefen(daten.von ?? '20:00', daten.bis ?? '06:30', daten.tage ?? []);
 	return insertSperre({
 		name: (daten.name ?? '').trim() || 'Sperrzeit',
 		tage: (daten.tage ?? []).slice().sort((a, b) => a - b).join(','),
@@ -172,7 +171,12 @@ export function aendern(id: number, daten: Partial<Sperrfenster>): void {
 	if (daten.aktiv !== undefined) satz.aktiv = daten.aktiv ? 1 : 0;
 	if (daten.tasten !== undefined) satz.tasten = daten.tasten ? 1 : 0;
 	if (daten.stumm !== undefined) satz.stumm = daten.stumm ? 1 : 0;
-	if (!sperrRow(id)) return;
+	const aktuell = sperrRow(id);
+	if (!aktuell) return;
+	if (!aktuell.einmal_bis) {
+		const neu = { ...aktuell, ...satz };
+		zeitPruefen(neu.von, neu.bis, neu.tage.split(',').filter(Boolean).map(Number));
+	}
 	updateSperre(id, satz);
 }
 

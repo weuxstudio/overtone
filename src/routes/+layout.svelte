@@ -53,16 +53,16 @@
 				{/if}
 			</div>
 			{#if overtone.gesperrt}
-				<span class="badge badge-sm badge-error gap-1" title="Kindersicherung aktiv">
-					<Icon name="wecker" groesse={13} />
-					{overtone.sperrtext}
+				<span class="badge badge-sm badge-error gap-1" title={overtone.schutztext}>
+					<Icon name="schloss" groesse={13} />
+					Sperre vorgesehen
 				</span>
 			{:else}
 				<span
-					class="badge badge-sm gap-1 {overtone.zustand.lastError
-						? 'badge-error'
-						: overtone.bereit
-							? 'badge-success'
+					class="badge badge-sm gap-1 {overtone.verbindungsText === 'verbunden'
+						? 'badge-success'
+						: overtone.verbindungsText === 'nicht erreichbar'
+							? 'badge-error'
 							: 'badge-ghost'}"
 					title="Zustand der Verbindung">
 					<Icon name="welle" groesse={13} />
