@@ -65,6 +65,13 @@ and the identifier of your speaker:
 Data lives in `~/.overtone`: database with stations, scenes and settings, generated
 audio under `~/.overtone/ton`, backups under `~/.overtone/sicherungen`.
 
+Run one instance per installation. The service listens for events from the speaker
+on `notifyPort` (8771 by default) and that port must stay free: when it is taken, a
+start falls back to a spare port, the box keeps sending its events to the older
+process and the display stops following the speaker. Give a second installation its
+own `notifyPort`. Stop the service with `kill` (SIGTERM); it closes within a few
+seconds.
+
 The station list starts with three widely known public streams as examples. Replace
 them in the app with whatever you listen to.
 
