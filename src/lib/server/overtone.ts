@@ -659,6 +659,23 @@ export async function ensureStarted(): Promise<void> {
 	}
 	console.log(`[overtone] Ereignisempfaenger auf ${myHost}:${aboPort}`);
 
+	// Beim Beenden muss der Ereignisempfaenger mit schliessen. Sonst haelt genau
+	// dieser Horcher den Prozess am Leben: der Dienst laeuft nach dem Stoppsignal
+	// weiter, ein Neustart bekommt einen Ausweichport und die Ereignisse der Box
+	// landen abwechselnd bei beiden Prozessen. Notausstieg nach drei Sekunden,
+	// falls noch etwas anderes festhaelt.
+	const beimBeenden = () => {
+		try {
+			runtime.server?.close();
+		} catch {
+			// Nur loslassen, Fehler dabei sind belanglos.
+		}
+		setTimeout(() => process.exit(0), 3000).unref();
+	};
+	process.once('sveltekit:shutdown', beimBeenden);
+	process.once('SIGTERM', beimBeenden);
+	process.once('SIGINT', beimBeenden);
+
 	const abos: Array<[string, string]> = [
 		['AVTransport', '/MediaRenderer/AVTransport/Event'],
 		['RenderingControl', '/MediaRenderer/RenderingControl/Event'],
