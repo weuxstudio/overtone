@@ -1,0 +1,107 @@
+@import 'tailwindcss';
+
+@plugin "daisyui" {
+	themes: false;
+	logs: false;
+}
+
+/* Eigene Farbwelt: dunkles Schlafzimmer, eine Hand, gedaempftes Licht.
+   Werte stammen aus der Designpruefung vom 15.10.2026. */
+@plugin "daisyui/theme" {
+	name: 'overtone';
+	default: true;
+	prefersdark: true;
+	color-scheme: dark;
+	--color-base-100: #101014;
+	--color-base-200: #1b1b22;
+	--color-base-300: #262633;
+	--color-base-content: #f2f2f5;
+	--color-primary: #2f6f4f;
+	--color-primary-content: #eafff3;
+	--color-secondary: #4f9e77;
+	--color-secondary-content: #08160f;
+	--color-accent: #a8e6c4;
+	--color-accent-content: #0d1a13;
+	--color-neutral: #262633;
+	--color-neutral-content: #f2f2f5;
+	--color-info: #8fc4e6;
+	--color-info-content: #08131a;
+	--color-success: #6fc79b;
+	--color-success-content: #06120c;
+	--color-warning: #e2b871;
+	--color-warning-content: #1a1205;
+	--color-error: #ff8a7a;
+	--color-error-content: #2a0f0c;
+	--radius-selector: 0.75rem;
+	--radius-field: 0.9rem;
+	--radius-box: 1.1rem;
+	--size-selector: 0.25rem;
+	--size-field: 0.28rem;
+	--border: 1px;
+	--depth: 0;
+	--noise: 0;
+}
+
+:root {
+	/* Gedaempfte Zweitschrift und Linien, gemessen gegen base-200 */
+	--overtone-muted: #b8b8c4;
+	--overtone-line: #3f3f50;
+	--overtone-schatten: 0 10px 24px -12px rgb(0 0 0 / 0.75);
+}
+
+html,
+body {
+	height: 100%;
+	background: var(--color-base-100);
+}
+
+body {
+	margin: 0;
+	-webkit-tap-highlight-color: transparent;
+	-webkit-text-size-adjust: 100%;
+	overscroll-behavior-y: contain;
+}
+
+/* Browserflaechen gehoeren zur Palette, nicht zum Standard. */
+::selection {
+	background: var(--color-secondary);
+	color: var(--color-secondary-content);
+}
+
+input,
+select,
+textarea {
+	caret-color: var(--color-accent);
+}
+
+html {
+	scrollbar-color: var(--overtone-line) var(--color-base-100);
+}
+
+:focus-visible {
+	outline: 2px solid var(--color-secondary);
+	outline-offset: 2px;
+}
+
+/* Gedaempfte Zweitschrift ueberall dort, wo DaisyUI keine eigene Klasse hat. */
+.gedaempft {
+	color: var(--overtone-muted);
+}
+
+/* Am Handy klebt :hover nach dem Tippen. Rueckmeldung kommt daher aus :active. */
+@media (hover: none) {
+	.btn:hover:not(.btn-active):not(:active) {
+		background-color: var(--btn-bg, var(--color-base-300));
+	}
+}
+
+/* Ein einziger bewegter Moment: das Antippen der Haupttaste. */
+.haupttaste:active {
+	transform: scale(0.96);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.haupttaste:active {
+		transform: none;
+	}
+}
