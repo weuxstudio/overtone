@@ -66,7 +66,7 @@
 				alt=""
 				class="absolute inset-0 h-full w-full scale-110 object-cover opacity-80 blur-xl saturate-150"
 			/>
-			<div class="absolute inset-0 bg-gradient-to-t from-neutral/95 via-neutral/85 to-neutral/60"></div>
+			<div class="absolute inset-0 bg-gradient-to-t from-neutral/95 via-neutral/70 to-neutral/40"></div>
 		{:else}
 			<div class="absolute inset-0 bg-base-200"></div>
 		{/if}
