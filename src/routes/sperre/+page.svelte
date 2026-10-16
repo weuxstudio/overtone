@@ -89,6 +89,10 @@
 			overtone.melde('Bitte mindestens einen Wochentag wählen.');
 			return;
 		}
+		if (`${vonStunde}:${vonMinute}` === `${bisStunde}:${bisMinute}`) {
+			overtone.melde('Anfangszeit und Endzeit müssen sich unterscheiden.');
+			return;
+		}
 		laeuft = true;
 		const antwort = await overtone.sperreAktion({
 			action: bearbeitet === null ? 'create' : 'update',
@@ -167,16 +171,15 @@
 		<div class="card-body gap-2 p-4">
 			<div class="flex items-start justify-between gap-3">
 				<h2 class="text-lg font-semibold">
-					{gesperrt ? overtone.sperrtext : freigabe ? 'Freigegeben' : 'Nicht gesperrt'}
+					{gesperrt ? overtone.sperrtext : freigabe ? 'Freigabe vorgesehen' : 'Keine Sperre vorgesehen'}
 				</h2>
 				<span class="badge badge-sm shrink-0 {gesperrt ? 'badge-error' : 'badge-ghost'}">
-					{gesperrt ? 'gesperrt' : 'offen'}
+					{gesperrt ? 'vorgesehen' : 'kein Zeitfenster'}
 				</span>
 			</div>
 			{#if gesperrt}
 				<p class="text-sm">
-					Wiedergabe gestoppt, Lautstärke auf null{tasten ? ', Tasten am Gerät gesperrt' : ''}. Startet jemand
-					über Spotify oder die Sonos App, wird es binnen Sekunden wieder gestoppt.
+					{overtone.schutztext}
 				</p>
 				<button class="btn btn-primary btn-block h-12" onclick={freigabeAnfordern}>
 					<Icon name="check" groesse={18} />
@@ -187,10 +190,17 @@
 					{#if freigabe}
 						{overtone.freigabeText}. Danach greift der Zeitplan wieder.
 					{:else}
-						Der Lautsprecher ist normal bedienbar. Sperrzeiten greifen nach Zeitplan.
+						{overtone.schutztext} Reguläre Sperrzeiten greifen bei eingeschaltetem Zeitplan.
 					{/if}
 				</p>
 			{/if}
+            {#if overtone.zustand.sperre?.fenster?.length}
+                <p class="text-sm gedaempft">Wirksam: {overtone.zustand.sperre.fenster.map(f => f.name).join(', ')}</p>
+            {/if}
+            {#if overtone.zustand.sperre?.geraet?.geprueft}
+                <p class="text-xs gedaempft">Letzte Geräteprüfung: {new Date(overtone.zustand.sperre.geraet.geprueft).toLocaleTimeString('de-DE')}</p>
+            {/if}
+            <p class="text-xs gedaempft">Zeitliche Sperren und Freigaben setzen einen laufenden Overtone Dienst voraus.</p>
 			{#if overtone.zustand.sperre?.gesperrt && overtone.zustand.sperre.freigabeBis}
 				<p class="text-xs gedaempft">{overtone.freigabeText}</p>
 			{/if}
@@ -200,13 +210,13 @@
 	<section class="card bg-base-200">
 		<div class="card-body gap-3 p-4">
 			<label class="flex cursor-pointer items-center justify-between gap-3 py-1">
-				<span class="text-sm font-medium">Kindersicherung insgesamt</span>
+				<span class="text-sm font-medium">Regulärer Zeitplan</span>
 				<input
 					class="toggle toggle-primary h-11 w-14"
 					type="checkbox"
 					checked={overtone.sperreGlobal}
 					onchange={() => {
-						if (gesperrt && overtone.pinAnfordern('aendern', 'Sicherung ausschalten', 'Code nötig.')) return;
+						if (gesperrt && overtone.pinAnfordern('aendern', 'Zeitplan ausschalten', 'Code nötig.')) return;
 						overtone.sperreAktion({ action: 'global', an: !overtone.sperreGlobal });
 					}}
 				/>
@@ -224,8 +234,8 @@
 				{/each}
 			</div>
 			<button class="btn btn-block h-12" onclick={schnellSperren}>
-				<Icon name="wecker" groesse={18} />
-				jetzt sperren für {minuten >= 60 ? `${minuten / 60} Stunden` : `${minuten} Minuten`}
+				<Icon name="schloss" groesse={18} />
+				jetzt sperren für {minuten >= 60 ? `${minuten / 60} ${minuten === 60 ? 'Stunde' : 'Stunden'}` : `${minuten} Minuten`}
 			</button>
 		</div>
 	</section>
@@ -245,7 +255,7 @@
 						<div class="flex items-start justify-between gap-3">
 							<div class="min-w-0">
 								<p class="font-medium">{f.name}</p>
-								<p class="text-sm gedaempft">{f.einmalBis ? 'Schnellsperre' : zeitText(f)}</p>
+								<p class="text-sm gedaempft">{f.einmalBis ? 'Einmalig bis ' + new Date(f.einmalBis).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }) : f.von === f.bis ? 'Ungültige Dauer. Anfangszeit und Endzeit korrigieren.' : zeitText(f)}</p>
 								<p class="text-xs gedaempft">
 									{f.tasten ? 'Tasten gesperrt' : 'Tasten frei'} · {f.stumm
 										? 'Lautstärke auf null'
@@ -359,7 +369,7 @@
 			<p class="rounded-box bg-base-300 px-3 py-2 text-sm">
 				{tage.length ? tage.map((t) => TAGE[t - 1].kurz).join(', ') : 'kein Tag'} von {vonStunde}:{vonMinute} bis
 				{bisStunde}:{bisMinute}
-				{#if vonStunde > bisStunde || (vonStunde === bisStunde && vonMinute >= bisMinute)}
+				{#if vonStunde > bisStunde || (vonStunde === bisStunde && vonMinute > bisMinute)}
 					· über Mitternacht
 				{/if}
 			</p>

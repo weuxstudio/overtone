@@ -1,5 +1,5 @@
 import { json } from '@sveltejs/kit';
-import { command, config, ensureStarted, playStream } from '#lib/server/overtone';
+import { command, ensureStarted, playStream, tonAdresse } from '#lib/server/overtone';
 
 // Wiedergabe anstossen und Fehler in eine Meldung verwandeln, statt die
 // Anfrage abstuerzen zu lassen.
@@ -22,11 +22,10 @@ import {
 } from '#lib/server/ton';
 
 // Der Lautsprecher holt die Tondateien bei diesem Dienst ab, nicht bei
-// 127.0.0.1, deshalb die Adresse aus dem Netz.
+// 127.0.0.1. Ereignisempfaenger und Audiodateien teilen die Adresserkennung:
+// ein ausdruecklich gesetzter callbackHost behaelt Vorrang.
 function adresse(datei: string): string {
-	const wirt = config.callbackHost || '127.0.0.1';
-	const port = process.env.PORT ?? '8770';
-	return `http://${wirt}:${port}/ton/${datei}`;
+	return tonAdresse(datei);
 }
 
 function lage() {

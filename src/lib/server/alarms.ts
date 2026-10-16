@@ -4,8 +4,10 @@
 // with error 402, and Recurrence only knows ONCE, DAILY, WEEKDAYS, WEEKENDS.
 
 import { call, didlForHttpAudio, unescapeXml } from './sonos';
-import { config, loadStations, resolveStream } from './overtone';
-import { alarmRow, alarmRows, deleteAlarmRow, saveAlarm, type AlarmRow } from './store';
+import { config, loadStations } from './overtone';
+import { alarmRow, alarmRows, deleteAlarmRow, saveAlarm, type AlarmRow, registriereHerkunft, pflegeHerkunft, zuordnen, protokolliere, transaktion } from './store';
+
+export function alarmKennung(id: number | string): string { return `${config.uuid || config.host}/${id}`; }
 
 export const RECURRENCE = ['ONCE', 'DAILY', 'WEEKDAYS', 'WEEKENDS'] as const;
 export type Recurrence = (typeof RECURRENCE)[number];
@@ -31,6 +33,8 @@ export type AlarmInput = {
 	stationId?: string;
 	duration?: string;
 	label?: string;
+	// Ohne Angabe bleiben neu angelegte Weckzeiten wie bisher aktiviert.
+	enabled?: boolean;
 };
 
 function clock(value: string): string {
@@ -61,12 +65,12 @@ async function fetchAlarmList(): Promise<Array<Record<string, string>>> {
 		stoerung = 'Der Lautsprecher antwortet nicht. Ist er eingeschaltet und im Netz?';
 		return [];
 	}
-	if (!r.ok) return [];
+	if (!r.ok) { stoerung = 'Weckzeiten konnten nicht gelesen werden.'; return []; }
 	// The device answers with a list that is escaped once more, and the single
 	// entries are written with &quot; as quote. Parsing the escaped text is the
 	// only safe way: addresses inside carry slashes, ampersands and quotes.
-	const block = r.xml.match(/<CurrentAlarmList>([\s\S]*?)<\/CurrentAlarmList>/);
-	if (!block) return [];
+	const block = (r.xml ?? '').match(/<CurrentAlarmList>([\s\S]*?)<\/CurrentAlarmList>/);
+	if (!block) { stoerung = 'Die Weckzeitenantwort ist unvollständig.'; return []; }
 	const out: Array<Record<string, string>> = [];
 	for (const teil of block[1].split('&lt;Alarm ').slice(1)) {
 		const ecke = teil.indexOf('/&gt;');
@@ -82,11 +86,11 @@ async function fetchAlarmList(): Promise<Array<Record<string, string>>> {
 	return out;
 }
 
-function stationFor(stationId?: string | null, uri?: string) {
+function stationFor(stationId?: string | null, uri?: string, streng = false) {
 	const list = loadStations();
 	if (stationId) {
 		const hit = list.find((s) => s.id === stationId);
-		if (hit) return hit;
+		if (hit && (!streng || !uri || uri.startsWith(hit.url.slice(0,40)))) return hit;
 	}
 	if (uri) {
 		const hit = list.find((s) => uri.startsWith(s.url.slice(0, 40)));
@@ -102,7 +106,7 @@ export async function listAlarms(): Promise<Alarm[]> {
 		.map((a) => {
 			const id = Number(a.ID ?? 0);
 			const row = bekannt.get(id);
-			const station = stationFor(row?.station_id, a.ProgramURI);
+			const station = stationFor(row?.station_id, a.ProgramURI, true);
 			return {
 				id,
 				time: a.StartTime ?? '',
@@ -110,7 +114,7 @@ export async function listAlarms(): Promise<Alarm[]> {
 				recurrence: a.Recurrence ?? 'ONCE',
 				enabled: a.Enabled === '1',
 				volume: Number(a.Volume ?? row?.volume ?? 10),
-				stationId: station?.id ?? row?.station_id ?? '',
+				stationId: station?.id ?? (!a.ProgramURI ? row?.station_id : '') ?? '',
 				stationName: station?.name ?? '',
 				title: station?.name ?? row?.label ?? '',
 				uri: a.ProgramURI ?? '',
@@ -136,7 +140,7 @@ async function writeAlarm(
 		metadata: string;
 		volume: number;
 	}
-): Promise<{ ok: boolean; id?: number; message?: string }> {
+): Promise<{ ok: boolean; id?: number; message?: string; ungeklaert?: boolean }> {
 	const basis: Record<string, string | number> = {
 		StartLocalTime: values.time,
 		Duration: values.duration,
@@ -157,40 +161,49 @@ async function writeAlarm(
 		return { ok: false, message: `Geraet hat abgelehnt (${res.errorCode ?? 'ohne Code'})` };
 	}
 	const neueId = id ?? Number(res.values.AssignedID ?? 0);
-	if (!neueId) return { ok: false, message: 'keine Nummer zurueckgegeben' };
+	if (!neueId) return { ok: false, message: 'Keine Gerätenummer erhalten. Ergebnis ungeklärt.', ungeklaert: true };
 	return { ok: true, id: neueId };
 }
 
-export async function createAlarm(input: AlarmInput): Promise<{ ok: boolean; message?: string }> {
+export async function createAlarm(input: AlarmInput, quellen: string[] = []): Promise<{ ok: boolean; id?: number; message?: string; ungeklaert?: boolean }> {
 	const zeit = clock(input.time);
 	const station = stationFor(input.stationId);
 	if (!station) return { ok: false, message: 'Sender unbekannt' };
 	// The stable station address is stored, not the resolved one: resolved
 	// addresses often carry a token that expires before the alarm rings.
-	const volumen = Math.min(60, Math.max(0, Number(input.volume ?? 10)));
+	const aktiviert = input.enabled === undefined || !!input.enabled;
+	const volumen = input.volume === undefined || input.volume === null ? 10 : Math.min(60, Math.max(0, Number(input.volume)));
 	const antwort = await writeAlarm(null, {
 		time: zeit,
 		duration: input.duration ?? '00:30:00',
 		recurrence: (RECURRENCE as readonly string[]).includes(input.recurrence ?? '')
 			? String(input.recurrence)
 			: 'ONCE',
-		enabled: true,
+		enabled: aktiviert,
 		uri: station.url,
 		metadata: didlForHttpAudio(station.url, station.name),
 		volume: volumen
 	});
-	if (!antwort.ok || !antwort.id) return { ok: false, message: antwort.message };
+	if (!antwort.ok || !antwort.id) return { ok: false, message: antwort.message, ungeklaert: antwort.ungeklaert };
+	transaktion(() => {
 	saveAlarm({
-		id: antwort.id,
+		id: antwort.id!,
 		time: zeit,
 		duration: input.duration ?? '00:30:00',
 		recurrence: String(input.recurrence ?? 'ONCE'),
-		enabled: 1,
+		enabled: aktiviert ? 1 : 0,
 		station_id: station.id,
 		volume: volumen,
 		label: input.label ?? station.name
 	});
-	return { ok: true };
+    const werte = { ...alarmRow(antwort.id!), enabled: aktiviert, uri: station.url };
+    registriereHerkunft('weckzeiten', alarmKennung(antwort.id!), werte);
+    if (quellen.length) {
+        zuordnen('weckzeiten', quellen, alarmKennung(antwort.id!), werte);
+        for (const quelle of quellen) protokolliere('weckzeiten', quelle, 'bestaetigt', [], alarmKennung(antwort.id!));
+    }
+    });
+    return { ok: true, id: antwort.id };
 }
 
 export async function updateAlarm(id: number, input: Partial<AlarmInput>): Promise<{ ok: boolean; message?: string }> {
@@ -198,8 +211,11 @@ export async function updateAlarm(id: number, input: Partial<AlarmInput>): Promi
 	if (!geraet) return { ok: false, message: 'Weckzeit gibt es am Geraet nicht mehr' };
 	const row = alarmRow(id);
 	const station = stationFor(input.stationId ?? row?.station_id, geraet.ProgramURI);
-	if (!station) return { ok: false, message: 'Sender unbekannt' };
-	const ziel = await resolveStream(station.url);
+	// Auch beim Bearbeiten gilt die stabile Senderadresse, nicht die
+	// aufgeloeste Adresse: aufgeloeste Adressen tragen oft ein Token, das
+	// ablaeuft, bevor der Wecker klingelt.
+	// Zählt der Sender hier nicht mehr, bleiben die vorhandene Geräteadresse
+	// und ihre Metadaten unangetastet.
 	const zeit = input.time ? clock(input.time) : (geraet.StartTime ?? '07:00:00');
 	const dauer = input.duration ?? geraet.Duration ?? '00:30:00';
 	const wiederholung = input.recurrence ?? geraet.Recurrence ?? 'ONCE';
@@ -209,8 +225,10 @@ export async function updateAlarm(id: number, input: Partial<AlarmInput>): Promi
 		duration: dauer,
 		recurrence: wiederholung,
 		enabled: geraet.Enabled === '1',
-		uri: ziel,
-		metadata: didlForHttpAudio(ziel, station.name),
+		uri: station ? station.url : (geraet.ProgramURI ?? ''),
+		metadata: station
+			? didlForHttpAudio(station.url, station.name)
+			: (geraet.ProgramMetaData ?? ''),
 		volume: volumen
 	});
 	if (!antwort.ok) return { ok: false, message: antwort.message };
@@ -220,10 +238,11 @@ export async function updateAlarm(id: number, input: Partial<AlarmInput>): Promi
 		duration: dauer,
 		recurrence: wiederholung,
 		enabled: geraet.Enabled === '1' ? 1 : 0,
-		station_id: station.id,
+		station_id: station?.id ?? row?.station_id ?? '',
 		volume: volumen,
-		label: input.label ?? row?.label ?? station.name
+		label: input.label ?? row?.label ?? (station?.name ?? '')
 	});
+	pflegeHerkunft('weckzeiten', alarmKennung(id), { ...alarmRow(id), enabled: geraet.Enabled === '1', uri: station?.url ?? geraet.ProgramURI ?? '' });
 	return { ok: true };
 }
 
@@ -232,24 +251,31 @@ export async function setAlarmEnabled(id: number, an: boolean): Promise<{ ok: bo
 	if (!geraet) return { ok: false, message: 'Weckzeit gibt es am Geraet nicht mehr' };
 	const row = alarmRow(id);
 	const station = stationFor(row?.station_id, geraet.ProgramURI);
-	const ziel = station ? await resolveStream(station.url) : '';
 	const antwort = await writeAlarm(id, {
 		time: geraet.StartTime ?? '07:00:00',
 		duration: geraet.Duration ?? '00:30:00',
 		recurrence: geraet.Recurrence ?? 'ONCE',
 		enabled: an,
-		uri: ziel || geraet.ProgramURI || '',
-		metadata: station ? didlForHttpAudio(ziel, station.name) : (geraet.ProgramMetaData ?? ''),
+		// Umschalten tastet die gespeicherte Adresse nicht an: stabile
+		// Senderadresse bleibt, ein unbekannter Sender behaelt die
+		// vorhandene Geräteadresse samt Metadaten.
+		uri: station ? station.url : (geraet.ProgramURI ?? ''),
+		metadata: station
+			? didlForHttpAudio(station.url, station.name)
+			: (geraet.ProgramMetaData ?? ''),
 		volume: Number(geraet.Volume ?? 10)
 	});
 	if (!antwort.ok) return { ok: false, message: antwort.message };
 	if (row) saveAlarm({ ...row, enabled: an ? 1 : 0 });
+	pflegeHerkunft('weckzeiten', alarmKennung(id), { ...row, time: geraet.StartTime, duration: geraet.Duration, recurrence: geraet.Recurrence, volume: Number(geraet.Volume ?? 10), enabled: an, uri: station?.url ?? geraet.ProgramURI ?? '' });
 	return { ok: true };
 }
 
 export async function deleteAlarm(id: number): Promise<{ ok: boolean; message?: string }> {
 	const res = await call(config.host, 'AlarmClock', 'DestroyAlarm', { ID: id });
-	deleteAlarmRow(id);
+	// Der lokale Datensatz geht erst weg, wenn der Lautsprecher die Löschung
+	// bestätigt hat.
 	if (!res.ok) return { ok: false, message: `Geraet hat abgelehnt (${res.errorCode ?? 'ohne Code'})` };
+	deleteAlarmRow(id, alarmKennung(id));
 	return { ok: true };
 }

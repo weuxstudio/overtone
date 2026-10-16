@@ -28,7 +28,7 @@
 	<section class="card bg-base-200">
 		<div class="card-body gap-3 p-4">
 			<h2 class="card-title text-base">
-				<Icon name="ton" groesse={18} />
+				<Icon name="welle" groesse={18} />
 				Klang
 			</h2>
 			{#if unbekannt}

@@ -1,5 +1,5 @@
 import { json } from '@sveltejs/kit';
-import { sperreDurchsetzen, state } from '#lib/server/overtone';
+import { sperreDurchsetzen, state, aktuellerSperrstatus } from '#lib/server/overtone';
 import {
 	aendern,
 	anlegen,
@@ -19,7 +19,7 @@ import {
 function lage() {
 	return {
 		ok: true,
-		status: status(new Date()),
+		status: aktuellerSperrstatus(),
 		fenster: fensterListe(),
 		pinGesetzt: pinGesetzt(),
 		global: sperreGlobal()
@@ -42,6 +42,7 @@ export async function POST({ request }) {
 		return json({ ok: false, message: 'Falscher Code.' }, { status: 403 });
 	}
 
+	try {
 	switch (aktion) {
 		case 'create': {
 			const id = anlegen({
@@ -78,7 +79,7 @@ export async function POST({ request }) {
 			const minuten = Math.max(1, Math.min(600, Number(body.minuten ?? 60)));
 			schnell(minuten, body.tasten !== false, body.stumm !== false);
 			await sperreDurchsetzen();
-			return json({ ...lage(), hinweis: `Gesperrt für ${minuten} Minuten.` });
+			return json({ ...lage(), hinweis: `Schnellsperre für ${minuten} Minuten vorgesehen.` });
 		}
 		case 'freigeben': {
 			if (laufend.gesperrt && pinGesetzt() && !pinPasst(String(body.pin ?? ''))) {
@@ -111,5 +112,8 @@ export async function POST({ request }) {
 			return json(lage());
 		default:
 			return json({ ok: false, message: 'unbekannte Aktion', ...state.sperre }, { status: 400 });
+	}
+	} catch (fehler) {
+		return json({ ok: false, message: fehler instanceof Error ? fehler.message : String(fehler) }, { status: 400 });
 	}
 }

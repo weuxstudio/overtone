@@ -19,13 +19,16 @@ alarms, scenes, sound settings, spoken announcements, sleep sounds and a child l
 - **Sound and light** – bass, treble, loudness, play mode, crossfade, LED state.
 - **Announcements and sounds** – type a text and the speaker reads it out (macOS
   `say`), or generate sleep sounds such as rain, sea, noise and night with `ffmpeg`.
-- **Child lock** – silences the speaker, forces volume to zero, locks the device
-  buttons and stops playback until the lock is released. PIN stored as scrypt hash.
-- **Backup** – stations, scenes, alarms and settings as a JSON file.
+- **Child lock** – combines overlapping schedules and independent one-off locks.
+  Playback, volume and mute are checked on the device. Button commands are shown
+  as accepted commands. The schedule requires a running service. PIN stored as scrypt hash.
+- **Backup** – versioned JSON with stable entry origins, a restore preview and
+  explicit choices for conflicts, settings and activation.
 
 ## Requirements
 
-- macOS or Linux with Node 20 or newer
+- macOS or Linux with Node 22.17 or newer (the built-in SQLite needs it; npm is
+  set up with `engine-strict`, so an older Node refuses to install)
 - a Sonos speaker in the same network
 - `say` and `ffmpeg` only for announcements and generated sounds
 
@@ -40,6 +43,44 @@ PORT=8770 HOST=0.0.0.0 ORIGIN=http://127.0.0.1:8770 node build/index.js
 ```
 
 Then open `http://127.0.0.1:8770`.
+
+Run the automated tests with `npm test`. They use temporary data directories
+and a simulated device, so they never touch real runtime data or the speaker.
+
+## Restore a backup
+
+The backup section under More first previews the latest local backup or a selected
+JSON file. Applying the preview preserves existing entries, local edits and recorded
+deletions. Version 2 backups retain entry origins across multiple exports and
+installations. Older backups remain supported through explicit matching or creation
+choices. Unknown format versions are rejected.
+
+New alarms and schedules remain disabled unless their saved activation is explicitly
+selected. Sound, play mode and the regular schedule switch also require explicit
+selection. An outdated preview must be refreshed before applying it.
+
+Confirmed steps survive partial failures and service restarts. If a device may have
+created an alarm but its reply was lost, its result remains unresolved. Inspect the
+current device list and assign the existing alarm or explicitly confirm that it was
+not created before trying again. Skipping an unresolved step keeps its unresolved
+status visible. There is no automatic rollback across the speaker and local files.
+
+## Child lock operation
+
+The regular schedule switch controls recurring windows. A new one-off lock applies
+independently, ends a temporary release and preserves the regular switch setting.
+Changes to recurring windows and their switch preserve an ongoing temporary release.
+Overlapping windows combine their requested button and mute protections. Equal start
+and end times are invalid; existing such windows need correction.
+
+The interface distinguishes intended protection, measured device state and an
+accepted button-lock command. Failed or stale device checks invalidate confirmation.
+The latest device check is shown on the child-lock page. The service uses its local
+time zone; an overnight window continues from the selected previous weekday.
+
+Keep the service running for timed protection and release. Device alarms continue
+without it, while timed enforcement and release by Overtone do not. A periodic check
+does not establish a guaranteed maximum reaction time.
 
 ## Configure the speaker
 
