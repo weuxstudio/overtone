@@ -165,15 +165,6 @@
 	</section>
 
 	<section class="card bg-base-200">
-		<div class="card-body p-2">
-			<button class="btn btn-ghost btn-block h-12" onclick={() => overtone.befehl('stop')}>
-				<Icon name="stop" groesse={18} />
-				Stopp
-			</button>
-		</div>
-	</section>
-
-	<section class="card bg-base-200">
 		<div class="card-body gap-1 p-4">
 			<div class="flex items-baseline justify-between">
 				<label class="text-sm font-medium" for="vol">Lautstärke</label>
